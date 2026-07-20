@@ -265,7 +265,19 @@ def _run_java_probes() -> list[dict]:
     return rows
 
 
+_KNOWN_FLAGS = {"--backend", "--expand", "--skip-java", "--java-only", "--json", "local"}
+
+
 def main() -> None:
+    unknown = [a for a in sys.argv[1:] if a not in _KNOWN_FLAGS]
+    if unknown:
+        # 静默忽略未知参数会让人以为生效，全量跑 50 条白烧 rerank 配额
+        print(f"[eval] 未知参数: {unknown}；可用: {sorted(_KNOWN_FLAGS)}")
+        sys.exit(2)
+    if "--java-only" in sys.argv:
+        # 只跑 K 类私有探针（阈值调参回归用，不碰主评测的 50 条 quota）
+        _run_java_probes()
+        return
     os.environ["SCM_EMBED_BACKEND"] = BACKEND
     # Cohere 试用 key 限速 10 次/分钟：50 条 query 连跑必然超限，静默降级 RRF
     # 会让分数随机劣化 ±10%，节流到限额内保证评测可复现（代价是评测变慢）。
