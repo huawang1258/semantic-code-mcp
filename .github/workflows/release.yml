@@ -31,16 +31,5 @@ jobs:
       - run: pip install build && python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  npm:
-    needs: check-versions
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-      - run: npm publish --access public
-        working-directory: npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  # npm 包（semcode-mcp 薄壳）从本机发布：cd npm && npm publish --access public
+  # （维护者本机已有 npm 凭证；如需 CI 发布，加 NPM_TOKEN secret 并恢复 npm job）
