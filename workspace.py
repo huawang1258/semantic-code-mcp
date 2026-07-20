@@ -167,11 +167,8 @@ class WorkspaceManager:
         """创建新的 workspace 实例。"""
         db_path = self._db_path_for(resolved)
         store = CodeStore(db_path, self.embedder.dim, dtype=self.embedder.output_dtype)
-        retriever = Retriever(
-            store,
-            self.embedder,
-            rerank_model=os.getenv("SCM_RERANK_MODEL", "rerank-v3.5"),
-        )
+        # rerank 后端/模型由 Retriever 按 SCM_RERANK_BACKEND / SCM_RERANK_MODEL 自行选择
+        retriever = Retriever(store, self.embedder)
         indexer = Indexer(resolved, store, self.embedder)
         # 文件监控：debounce 后后台主动增量同步（对齐 augment 的 _doIncrementalSync），
         # 查询时索引已是最新，不再把同步成本摊到首次查询延迟上

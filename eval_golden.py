@@ -268,8 +268,10 @@ def _run_java_probes() -> list[dict]:
 def main() -> None:
     os.environ["SCM_EMBED_BACKEND"] = BACKEND
     # Cohere 试用 key 限速 10 次/分钟：50 条 query 连跑必然超限，静默降级 RRF
-    # 会让分数随机劣化 ±10%。节流到限额内保证评测可复现（代价是评测变慢）。
-    os.environ.setdefault("SCM_RERANK_MIN_INTERVAL", "6.2")
+    # 会让分数随机劣化 ±10%，节流到限额内保证评测可复现（代价是评测变慢）。
+    # 默认后端 Voyage 无此限制，仅显式切 Cohere 时默认节流。
+    if os.getenv("SCM_RERANK_BACKEND", "auto").lower() == "cohere":
+        os.environ.setdefault("SCM_RERANK_MIN_INTERVAL", "6.2")
     embedder = create_embedder()
     store = CodeStore(DB_PATH, embedder.dim, dtype=embedder.output_dtype)
     indexer = Indexer(str(TARGET), store, embedder)

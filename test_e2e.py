@@ -54,7 +54,7 @@ def main() -> None:
         store = CodeStore(db_path, embedder.dim)
         indexer = Indexer(str(target), store, embedder)
         retriever = Retriever(store, embedder)
-        mode = "启用 (Cohere)" if retriever.cohere_client else "未配置，使用 RRF 融合结果"
+        mode = f"启用 ({retriever.rerank_backend}/{retriever.rerank_model})" if retriever.rerank_client else "未配置，使用 RRF 融合结果"
         print(f"[e2e] rerank: {mode}")
 
         # 1. 全量索引

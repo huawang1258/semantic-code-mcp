@@ -2,7 +2,7 @@
 
 自建代码语义检索 MCP Server —— 自然语言查询 → 相关代码片段。
 
-「效果优先」技术栈：**Tree-sitter AST 切分 + voyage-code-3 embedding（int8 量化）+ sqlite-vec 向量库 + BM25 全文 + RRF 融合 + Cohere rerank + Call Graph 图扩展**。
+「效果优先」技术栈：**Tree-sitter AST 切分 + voyage-code-3 embedding（int8 量化）+ sqlite-vec 向量库 + BM25 全文 + RRF 融合 + Voyage rerank-2.5 重排 + Call Graph 图扩展**。一个 `VOYAGE_API_KEY` 跑通 embedding + rerank 全链路。
 
 工程特性：**watchdog 文件实时监控 + 多工作区 LRU 管理 + MCP progress notification + cancel signal**。
 
@@ -19,7 +19,7 @@ codebase_search(query, dir)
         │                                                                        │
         │                                                          Store(sqlite-vec + FTS5 + 文件hash)
         ▼
-  Retriever ── 向量召回 + BM25召回 ── RRF融合 ── Cohere rerank ── Call Graph扩展 ── top_n 代码片段
+  Retriever ── 向量召回 + BM25召回 ── RRF融合 ── rerank（Voyage/Cohere）── Call Graph扩展 ── top_n 代码片段
         │
         ▼
   MCP Server ── async tools + progress notification + cancel signal
@@ -48,8 +48,8 @@ pip install -r requirements.txt
 
 | 变量 | 必需 | 说明 |
 |---|---|---|
-| `VOYAGE_API_KEY` | 是 | Voyage embedding，申请：https://dash.voyageai.com/ |
-| `COHERE_API_KEY` | 否 | Cohere rerank，不配则跳过重排仅用 RRF |
+| `VOYAGE_API_KEY` | 是 | Voyage embedding + rerank（同一个 key 双用），申请：https://dash.voyageai.com/ |
+| `COHERE_API_KEY` | 否 | 可选 rerank 后备后端；默认用 Voyage rerank-2.5，无需此 key |
 
 ### 高级配置
 
@@ -61,7 +61,8 @@ pip install -r requirements.txt
 | `SCM_EMBED_MIN_INTERVAL` | `0` | 请求最小间隔秒数（未绑卡 3 RPM 限制时设 `21`） |
 | `SCM_EMBED_CONCURRENCY` | voyage `3` / local `1` | 索引时 embedding 并发请求数（实测 3 路≈提速 3 倍） |
 | `SCM_EMBED_CHAR_BUDGET` | `200000` | 单批最大字符数（未绑卡时可调小） |
-| `SCM_RERANK_MODEL` | `rerank-v3.5` | Rerank 模型 |
+| `SCM_RERANK_BACKEND` | `auto` | rerank 后端：`auto`（有 VOYAGE key 用 Voyage，其次 Cohere）/ `voyage` / `cohere` / `off` |
+| `SCM_RERANK_MODEL` | 按后端 | voyage → `rerank-2.5`，cohere → `rerank-v3.5` |
 | `SCM_DB_DIR` | `~/.semantic-code-mcp` | 索引数据库存放目录 |
 | `SCM_TOP_K` | `50` | 向量召回候选数 |
 | `SCM_TOP_N` | `10` | 最终返回结果数 |
@@ -78,9 +79,7 @@ pip install -r requirements.txt
       "command": "python",
       "args": ["D:/project/main/MCP/semantic-code-mcp/server.py"],
       "env": {
-        "VOYAGE_API_KEY": "your-voyage-key",
-        "COHERE_API_KEY": "your-cohere-key",
-        "HTTPS_PROXY": "http://127.0.0.1:7897"
+        "VOYAGE_API_KEY": "your-voyage-key"
       }
     }
   }
@@ -103,7 +102,7 @@ pip install -r requirements.txt
 1. **切分**：Tree-sitter 解析 AST，按函数/类边界切块，保留 `file_path / symbol / 行号` 元数据。
 2. **向量化**：voyage-code-3 对代码块生成 1024 维向量（`input_type=document`）。
 3. **存储**：向量入 sqlite-vec（vec0 虚拟表），同时入 FTS5 全文索引；`blob_hash = SHA256(path+code)` 实现内容寻址去重。
-4. **检索**：查询同时走向量 KNN 与 BM25，用 RRF 融合排名，再用 Cohere rerank 精排出 top_n。
+4. **检索**：查询同时走向量 KNN 与 BM25，用 RRF 融合排名，再用 rerank（默认 Voyage rerank-2.5）精排出 top_n。
 5. **图扩展**：主结果沿 call graph 扩展 1 跳，把调用者/被调用者连带召回（附 `relation` 标记）。
 6. **实时监控**：watchdog 监控文件变更（2s debounce），**后台主动增量同步**（O(变更数)），查询时零等待；后台失败不丢变更，下次查询前兜底。
 7. **LRU 管理**：多工作区并发（最多 8 个），超限自动淘汰最久未用的 workspace。
@@ -120,8 +119,8 @@ pip install -r requirements.txt
 
 | 接收方 | 发送内容 | 时机 |
 |---|---|---|
-| Voyage AI | 代码块全文（含相对路径/符号名上下文头）+ 查询文本 | 索引时 + 每次检索 |
-| Cohere（可选） | 查询文本 + top-50 候选代码块全文 | 每次检索；不配 `COHERE_API_KEY` 则零发送 |
+| Voyage AI | 代码块全文（embedding + rerank 候选）+ 查询文本 | 索引时 + 每次检索 |
+| Cohere（可选后端） | 查询文本 + top-50 候选代码块全文 | 仅 `SCM_RERANK_BACKEND=cohere` 时；默认零发送 |
 | 自配 LLM 端点（可选，默认关） | 仅查询文本（不含代码） | `SCM_QUERY_EXPANSION=on` 时 |
 
 供应商对 API 数据的保留/训练策略请以其当前条款为准自行评估（Voyage/Cohere 均声明 API 数据默认不用于训练，本项目不替其背书）。
@@ -162,14 +161,15 @@ SCM_EMBED_BACKEND=local        # 本地 embedding（默认 Qwen/Qwen3-Embedding-
 ## 评测（eval_golden.py，CLIProxyAPI 778 文件 / 9067 块）
 
 50 条 query × 10 类（符号定位/调用链/架构职责/配置schema/同名干扰/SDK边界/协议契约/测试/中文/细节），
-机械化打分可复现（期望文件 + must_contain 关键字），rerank 节流至试用限额内：
+机械化打分可复现（期望文件 + must_contain 关键字）：
 
-| 指标 | 成绩 | 参考（自托管 0.6B 方案公开数据） |
-|---|---|---|
-| Top-1 精确命中 | 84% | 32% |
-| Recall@5 | 100% | 54% |
-| 答案可用性 | 100% | 80% |
-| MRR | 0.897 | — |
+| 指标 | Voyage rerank-2.5（默认） | Cohere v3.5 基线 | 参考（自托管 0.6B 方案公开数据） |
+|---|---|---|---|
+| Top-1 精确命中 | **88%** | 84% | 32% |
+| Recall@5 | 98% | 100% | 54% |
+| 答案可用性 | 100% | 100% | 80% |
+| MRR | **0.916** | 0.897 | — |
+| 平均延迟 | **0.96s** | 6.2s（试用 key 节流） | — |
 
 附加 **K 类私有业务仓库探针**（不计入主总分）：在真实业务仓库上验证复合意图拆分/
 子查询分数混合/保底、trigram 中文召回、实现意图降权、`expand_graph=True` 全链路。
@@ -179,15 +179,24 @@ SCM_EMBED_BACKEND=local        # 本地 embedding（默认 Qwen/Qwen3-Embedding-
 
 复测：`python eval_golden.py --json`；回归测试：`python test_fixes.py`
 
+### 模型选型说明
+
+- **embedding 为什么是 voyage-code-3 而非 Voyage 4 系列**：4 系列（2026-01）是通用文本模型，
+  **没有 voyage-code-4**；官方文档代码检索场景仍推荐 code-3。想试通用旗舰可
+  `SCM_EMBED_MODEL=voyage-4-large`（需重建索引），与 code-3 的对比评测列入后续。
+- **rerank 为什么默认 Voyage**：与 embedding 同一个 key 零额外配置；rerank-2.5 公开基准
+  优于 Cohere v3.5（官方数据 +7.94%，本项目评测 Top-1 +4）；免费额度 200M token 且无
+  试用 key 10 次/分钟限速（评测提速 6.5×）。Cohere 保留为可选后端。
+
 ### 工程边界（已知成本）
 
-- **Cohere rerank 限速**：试用 key 10 次/分钟。密集调用（评测、批量脚本）设
-  `SCM_RERANK_MIN_INTERVAL` 节流；生产建议换付费 key（429 自动退避重试兜底）。
+- **rerank 限速**：未绑卡/试用 key 限速低（Cohere 试用 10 次/分钟）。密集调用设
+  `SCM_RERANK_MIN_INTERVAL` 节流；429 自动退避重试兜底。
 - **复合 query 额外延迟**：中文双动作查询（"生成…并清理…"）每个子查询多发一次
   rerank（+200~400ms/次，最多 2 次）。仅复合措辞触发，普通查询零开销。
-- **阈值标定范围**：子查询分数门槛 0.2、两段拆分等参数在中文 Java 仓库 + Go 仓库
-  双评测集上标定；其它语言/仓库如表现异常，优先复核 `_COMPOUND_SUB_MIN_SCORE`
-  （Cohere 中文短查询分数整体偏低，0.2 是"字面噪声/真业务"分界线）。
+- **阈值标定范围**：子查询分数门槛 0.2、两段拆分等参数按 **Cohere 分数分布**在中文
+  Java 仓库 + Go 仓库双评测集上标定；切换 rerank 后端（分数分布不同）或其它语言/
+  仓库表现异常时，优先复核 `_COMPOUND_SUB_MIN_SCORE`。
 
 ## 性能数据（42 块 / 9 文件）
 

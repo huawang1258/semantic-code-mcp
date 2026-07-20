@@ -1,9 +1,15 @@
-"""检索层：向量 + BM25 hybrid 召回，RRF 融合，Cohere rerank 重排，意图感知打分。
+"""检索层：向量 + BM25 hybrid 召回，RRF 融合，rerank 重排，意图感知打分。
 
 流程：query -> 向量召回 + BM25 召回 -> RRF 融合 -> (可选)rerank
       -> 调用链意图直查 edges 置顶 -> 测试/barrel/非代码降权（测试与文档意图反转为 boost）
       -> 符号/文件名 boost -> 文件多样性截断 -> call graph 图扩展
-未配置 COHERE_API_KEY 时自动跳过 rerank，直接使用 RRF 融合分数。
+
+rerank 后端（SCM_RERANK_BACKEND）：
+  auto（默认）  有 VOYAGE_API_KEY 用 Voyage rerank-2.5（与 embedding 同一个 key）；
+              否则有 COHERE_API_KEY 用 Cohere；都没有则跳过 rerank 直接用 RRF 分数
+  voyage      强制 Voyage（默认模型 rerank-2.5）
+  cohere      强制 Cohere（默认模型 rerank-v3.5）
+  off         禁用 rerank
 """
 from __future__ import annotations
 
@@ -21,15 +27,22 @@ try:
 except Exception:  # 依赖缺失不阻断
     cohere = None
 
+try:
+    import voyageai
+except Exception:  # 依赖缺失不阻断
+    voyageai = None
+
 
 # RRF 融合常数，经验值 60
 _RRF_K = 60
 # 送入 rerank 的单文档最大字符数
 _RERANK_DOC_MAX_CHARS = 4000
-# rerank 429 限速重试：次数与退避基数（Cohere 试用 key 10 次/分钟，
+# rerank 429 限速重试：次数与退避基数（试用/未绑卡 key 限速低，
 # 静默降级会让排序质量随机劣化，退避重试把调用速率压回限额内）
 _RERANK_MAX_RETRIES = 2
 _RERANK_BACKOFF_S = 6.0
+# 各后端默认 rerank 模型
+_RERANK_DEFAULT_MODELS = {"voyage": "rerank-2.5", "cohere": "rerank-v3.5"}
 
 
 def _rerank_min_interval() -> float:
@@ -144,19 +157,40 @@ class Retriever:
         store: CodeStore,
         embedder: Embedder,
         rerank_api_key: str | None = None,
-        rerank_model: str = "rerank-v3.5",
+        rerank_model: str | None = None,
         expander=None,
     ) -> None:
         self.store = store
         self.embedder = embedder
-        self.rerank_model = rerank_model
-        key = rerank_api_key or os.getenv("COHERE_API_KEY")
-        self.cohere_client = cohere.Client(key) if (key and cohere) else None
+        self.rerank_backend, self.rerank_client = self._create_rerank_client(rerank_api_key)
+        self.rerank_model = (
+            rerank_model
+            or os.getenv("SCM_RERANK_MODEL")
+            or _RERANK_DEFAULT_MODELS.get(self.rerank_backend, "")
+        )
         # 节流时间戳无锁：SCM_RERANK_MIN_INTERVAL 仅评测等单线程密集场景启用，
         # 生产默认 0（不节流），并发竞态最坏多发一次请求、由 429 重试兜底
         self._last_rerank_ts = 0.0
         # 查询扩展（HyDE + 多查询变体）：默认按 SCM_QUERY_EXPANSION 开关创建
         self.expander = expander if expander is not None else create_expander()
+
+    @staticmethod
+    def _create_rerank_client(api_key: str | None = None):
+        """按 SCM_RERANK_BACKEND 选择 rerank 后端，返回 (backend, client)。
+
+        auto：Voyage 优先（embedding 已必配 VOYAGE_API_KEY，同 key 免额外配置，
+        且 rerank-2.5 公开基准优于 Cohere v3.5），其次 Cohere，都无则跳过。
+        """
+        backend = os.getenv("SCM_RERANK_BACKEND", "auto").lower()
+        if backend == "off":
+            return "off", None
+        voyage_key = os.getenv("VOYAGE_API_KEY")
+        cohere_key = api_key or os.getenv("COHERE_API_KEY")
+        if backend in ("auto", "voyage") and voyage_key and voyageai:
+            return "voyage", voyageai.Client(api_key=voyage_key)
+        if backend in ("auto", "cohere") and cohere_key and cohere:
+            return "cohere", cohere.Client(cohere_key)
+        return "off", None
 
     @staticmethod
     def _is_test_file(file_path: str) -> bool:
@@ -383,7 +417,7 @@ class Retriever:
                 ch["score"] = rrf_score
                 candidates.append(ch)
         # 4. rerank（可选，失败降级为 RRF 分数）；多取候选给后续多样性截断留余量
-        if self.cohere_client and candidates:
+        if self.rerank_client and candidates:
             pre_rerank = {c.get("id"): c for c in candidates}
             try:
                 rerank_n = min(len(candidates), max(top_n * 3, 20))
@@ -634,16 +668,27 @@ class Retriever:
                     time.sleep(wait)
             try:
                 self._last_rerank_ts = time.time()
-                resp = self.cohere_client.rerank(
-                    model=self.rerank_model,
-                    query=query,
-                    documents=docs,
-                    top_n=min(top_n, len(docs)),
-                )
+                if self.rerank_backend == "voyage":
+                    resp = self.rerank_client.rerank(
+                        query=query,
+                        documents=docs,
+                        model=self.rerank_model,
+                        top_k=min(top_n, len(docs)),
+                    )
+                else:
+                    resp = self.rerank_client.rerank(
+                        model=self.rerank_model,
+                        query=query,
+                        documents=docs,
+                        top_n=min(top_n, len(docs)),
+                    )
                 break
             except Exception as e:
                 # 仅对限速重试（退避后速率回到限额内）；其它异常继续抛给外层降级 RRF
-                if "TooManyRequests" not in type(e).__name__ or attempt >= _RERANK_MAX_RETRIES:
+                # Cohere 抛 TooManyRequestsError，Voyage 抛 RateLimitError
+                name = type(e).__name__
+                retryable = "TooManyRequests" in name or "RateLimit" in name
+                if not retryable or attempt >= _RERANK_MAX_RETRIES:
                     raise
                 time.sleep(_RERANK_BACKOFF_S * (attempt + 1))
         out: list[dict] = []
