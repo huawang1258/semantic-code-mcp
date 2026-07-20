@@ -1,6 +1,6 @@
 {
   "name": "semcode-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Semantic code search MCP server: Tree-sitter AST chunking + voyage-code-3 embeddings + hybrid retrieval (sqlite-vec + FTS5 + RRF) + Voyage rerank-2.5 + call graph expansion. Thin npx wrapper that launches the Python package via uvx.",
   "bin": {
     "semcode-mcp": "bin.js"
