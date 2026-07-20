@@ -112,6 +112,41 @@ pip install -r requirements.txt
 
 每个工作区按目录路径哈希存为 `~/.semantic-code-mcp/<hash>.db`（可用 `SCM_DB_DIR` 改）。删除该目录即清空所有索引。
 
+## 隐私与数据边界
+
+本工具的完整数据流向，用于评估能否用于敏感/闭源仓库：
+
+### 会出网的数据（默认配置）
+
+| 接收方 | 发送内容 | 时机 |
+|---|---|---|
+| Voyage AI | 代码块全文（含相对路径/符号名上下文头）+ 查询文本 | 索引时 + 每次检索 |
+| Cohere（可选） | 查询文本 + top-50 候选代码块全文 | 每次检索；不配 `COHERE_API_KEY` 则零发送 |
+| 自配 LLM 端点（可选，默认关） | 仅查询文本（不含代码） | `SCM_QUERY_EXPANSION=on` 时 |
+
+供应商对 API 数据的保留/训练策略请以其当前条款为准自行评估（Voyage/Cohere 均声明 API 数据默认不用于训练，本项目不替其背书）。
+
+### 始终留在本地的
+
+- 索引库全部落盘本机 `~/.semantic-code-mcp/`（向量 + 代码原文 + call graph），不上传任何服务
+- 无遥测、无统计上报，除上表 API 外零网络请求
+
+### 索引范围控制
+
+- 全层级遵守 `.gitignore`（含否定模式）：`.env`、构建产物等被忽略的文件不会进索引
+- 例外：`AGENTS.md`/`.windsurfrules` 等 agent 指导文件即使被 gitignore 也会索引（有意设计，它们对检索架构问题价值极高）
+- ⚠️ **硬编码在代码里的密钥会随代码块发往上表供应商**，敏感仓库索引前请先清理或用全本地模式
+
+### 全本地模式（代码零出网）
+
+```bash
+pip install sentence-transformers
+SCM_EMBED_BACKEND=local        # 本地 embedding（默认 Qwen/Qwen3-Embedding-0.6B）
+# 不配 COHERE_API_KEY         # rerank 自动跳过，用 RRF 融合排序
+```
+
+检索质量会下降（参考公开评测中自托管 0.6B 方案的差距），但数据完全不离开本机。
+
 ## 路线
 
 - **阶段 1** ✅：Tree-sitter + voyage-code-3 + hybrid + rerank —— 第一梯队 RAG
@@ -163,12 +198,3 @@ pip install -r requirements.txt
 | 检索延迟 | 0.3–0.8s | 0.3–0.8s |
 | Top5 一致率 | — | 95%（19/20） |
 | Rerank 排序 | score 0.1–0.7 | — |
-
-## Code Review 摘要
-
-全部 ~1600 行核心代码（含 watcher/workspace），无严重 bug。架构分层清晰，每层职责单一：
-
-- **降级策略完善**：AST 失败→行切分，rerank 失败→RRF，int8 不支持→float
-- **增量一致性**：embedding 成功后才记录 hash，崩溃后下次自动重试
-- **实时增量**：watchdog 文件监控 + dirty 增量同步（O(变更数)），解决大项目全量扫描延迟
-- **资源管理**：LRU 淘汰超限工作区，watcher 随 workspace 生命周期自动清理
