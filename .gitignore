@@ -1,0 +1,25 @@
+# 敏感配置 - 含 API key，禁止提交
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 本地索引库
+*.db
+.semantic-code-mcp/
+
+# 本地资料存档
+*.html
+*_files/
+scm_e2e_*/
+
+# 本地私有探针集（含内部仓库信息，不随仓库分发）
+eval_local_probes.py
+
+# 评测输出
+eval_result_scm.json
+
+# 临时探针脚本
+_probe*.py
