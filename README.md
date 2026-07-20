@@ -38,15 +38,17 @@ codebase_search(query, dir)
 
 ## 安装
 
+发布包名为 `semcode-mcp`（PyPI 上 `semantic-code-mcp` 已被同名项目占用）：
+
 ```bash
 # 方式一（推荐）：uv 环境零安装，MCP 客户端配置里直接 uvx 启动
-uvx semantic-code-mcp
+uvx semcode-mcp
 
 # 方式二：npx（要求已装 uv，该 npm 包是透传 uvx 的薄壳）
-npx -y semantic-code-mcp
+npx -y semcode-mcp
 
 # 方式三：pip
-pip install semantic-code-mcp
+pip install semcode-mcp
 
 # 源码开发
 pip install -e .
@@ -87,7 +89,7 @@ pip install -e .
   "mcpServers": {
     "semantic-code": {
       "command": "uvx",
-      "args": ["semantic-code-mcp"],
+      "args": ["semcode-mcp"],
       "env": {
         "VOYAGE_API_KEY": "your-voyage-key"
       }
@@ -96,8 +98,8 @@ pip install -e .
 }
 ```
 
-npx 用法把 `command/args` 换成 `"npx", ["-y", "semantic-code-mcp"]`；
-源码开发用 `pip install -e .` 后配 `"semantic-code-mcp", []`（包采用相对 import，
+npx 用法把 `command/args` 换成 `"npx", ["-y", "semcode-mcp"]`；
+源码开发用 `pip install -e .` 后配 `"semcode-mcp", []`（包采用相对 import，
 不支持 `python server.py` 直接跑，需用 console script 或 `python -m semantic_code_mcp.server`）。
 
 ## 工具
