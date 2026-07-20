@@ -220,7 +220,12 @@ class Indexer:
         try:
             rel = p.relative_to(self.root).as_posix()
         except ValueError:
-            return True
+            # 路径形式不一致（Windows 8.3 短路径/大小写/符号链接）时 resolve
+            # 归一后重试，否则 watcher/调用方传入的原始形式会被静默跳过
+            try:
+                rel = p.resolve().relative_to(self.root).as_posix()
+            except ValueError:
+                return True
         if self._gitignore and not force and self._gitignore.match_file(rel):
             return True
         if size is None:
