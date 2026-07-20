@@ -141,12 +141,19 @@ _COMPOUND_SUB_WEIGHT = 0.7
 _COMPOUND_PROBE_TOP = 10
 # 子查询 rerank 分数混合：探针块用整句 rerank 分天然吃亏（"清理 100 天"
 # 在整句里只占小半权重），单独用子查询文本再 rerank 一次，
-# 最终分取 max(整句分, 子查询分 × 此系数)
-_COMPOUND_SUB_RERANK_MIX = 0.9
-# 子查询分参与混合/保底的最低门槛：实测"清理"这种宽泛短词的字面命中
-# （clearCache/clear 工具方法）全部 ≤0.14，真业务清理实现 ≥0.22，
-# 0.2 是天然分界线；低于门槛的子查询信号不参与任何提分
-_COMPOUND_SUB_MIN_SCORE = 0.2
+# 混合分 = 整句 top 分 × 子查询相对强度 × 此系数（子意图最佳代表
+# ≈ 整句最佳的 95 折；Voyage 分数域窄，0.9 的提拔量不足以越过
+# 中间名次的密集分数带，0.95 实测 K1 探针 rank5→rank3）
+_COMPOUND_SUB_RERANK_MIX = 0.95
+# 子查询分参与混合/保底的最低门槛，按 rerank 后端分档标定（分数分布不同，
+# 绝对阈值跨后端不通用）：
+# - cohere（rerank-v3.5）分布宽：实测"清理"这种宽泛短词的字面命中
+#   （clearCache/clear 工具方法）全部 ≤0.14，真业务清理实现 ≥0.22，0.2 是分界线
+# - voyage（rerank-2.5）分布窄且整体偏高：无关块 <0.5，字面噪声（0.63）与
+#   真业务（0.645）重叠不可分——0.55 只拦"彻底无关"，字面噪声由
+#   "子意图已有代表则不动"（6.5）与 must_contain 探针兜底
+_COMPOUND_SUB_MIN_SCORE = {"voyage": 0.55, "cohere": 0.2}
+_COMPOUND_SUB_MIN_DEFAULT = 0.2
 
 
 class Retriever:
@@ -387,6 +394,7 @@ class Retriever:
         # 2.9 复合意图拆分（"生成+清理"）：单次向量召回对双动作查询天然偏科，
         #     各子查询独立召回后低权重并入 RRF，两个意图都能拿到席位
         subs = self._compound_subqueries(query)
+        min_sub = _COMPOUND_SUB_MIN_SCORE.get(self.rerank_backend, _COMPOUND_SUB_MIN_DEFAULT)
         sub_probes: list[list[int]] = []  # 每个子查询自己的前 N 名（保底探针/分数混合用）
         for sub in subs:
             s_emb = self.embedder.embed_query(sub)
@@ -438,6 +446,11 @@ class Retriever:
             #     子查询文本打分才能反映它对那半意图的真实相关性
             if subs and sub_probes:
                 by_id = {c.get("id"): c for c in candidates}
+                # 混合量纲锚定整句 top 分：Voyage 分数域窄（整句/子查询分都挤在
+                # 0.5-0.8，裸子查询分 ×0.9 永远赢不了整句分，混合失效）；
+                # 改为整句 top × 子查询相对强度，两后端语义一致：
+                # 子查询的最佳代表 ≈ 整句最佳的 _COMPOUND_SUB_RERANK_MIX 折
+                full_top = max((c.get("score", 0.0) for c in candidates), default=0.0)
                 for sub, probe in zip(subs, sub_probes):
                     sub_cands = [by_id[cid] for cid in probe if cid in by_id]
                     if not sub_cands:
@@ -446,14 +459,17 @@ class Retriever:
                         scored = self._rerank(sub, sub_cands, len(sub_cands))
                     except Exception:
                         continue
+                    sub_top = max((s["score"] for s in scored), default=0.0)
                     for s in scored:
                         c = by_id.get(s.get("id"))
                         if c is None:
                             continue
                         c["_sub_score"] = max(c.get("_sub_score", 0.0), s["score"])
-                        if s["score"] >= _COMPOUND_SUB_MIN_SCORE:
+                        if s["score"] >= min_sub and sub_top > 0:
                             c["score"] = max(
-                                c["score"], s["score"] * _COMPOUND_SUB_RERANK_MIX
+                                c["score"],
+                                full_top * (s["score"] / sub_top)
+                                * _COMPOUND_SUB_RERANK_MIX,
                             )
         # 4.5 调用链意图：结构化命中注入高分（并入统一打分管线，测试调用方会被后续降权拆开）
         intent_hits = self._caller_intent_hits(query)
@@ -548,7 +564,7 @@ class Retriever:
                     (
                         by_id[cid] for cid in probe
                         if cid in by_id and cid not in rescued_ids
-                        and by_id[cid].get("_sub_score", 0.0) >= _COMPOUND_SUB_MIN_SCORE
+                        and by_id[cid].get("_sub_score", 0.0) >= min_sub
                         and not (path_filter and not self._path_match(
                             by_id[cid].get("file_path", ""), path_filter))
                     ),
