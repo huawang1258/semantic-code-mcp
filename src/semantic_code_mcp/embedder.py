@@ -81,14 +81,25 @@ class Embedder:
 
     def embed_query(self, text: str) -> list[float]:
         """检索用：embedding 单条查询（带 LRU 缓存）。"""
-        if text in self._query_cache:
-            self._query_cache.move_to_end(text)
-            return self._query_cache[text]
-        result = self._embed([text], "query")[0]
-        self._query_cache[text] = result
-        if len(self._query_cache) > self._query_cache_max:
-            self._query_cache.popitem(last=False)
-        return result
+        return self.embed_queries([text])[0]
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        """检索用：批量 embedding 多条查询，与输入一一对应。
+
+        复合查询主查询 + 子查询合并成一次请求（省 N-1 次网络往返）；
+        命中缓存的不重发，只有未命中子集上行。
+        """
+        missing = [t for t in dict.fromkeys(texts) if t not in self._query_cache]
+        if missing:
+            for t, vec in zip(missing, self._embed(missing, "query")):
+                self._query_cache[t] = vec
+                if len(self._query_cache) > self._query_cache_max:
+                    self._query_cache.popitem(last=False)
+        out: list[list[float]] = []
+        for t in texts:
+            self._query_cache.move_to_end(t)
+            out.append(self._query_cache[t])
+        return out
 
     def _embed(self, texts: list[str], input_type: str) -> list[list[float]]:
         results: list[list[float]] = []
@@ -182,6 +193,10 @@ class LocalEmbedder:
         if len(self._query_cache) > self._query_cache_max:
             self._query_cache.popitem(last=False)
         return result
+
+    def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        """与 Embedder.embed_queries 同接口；本地推理无网络往返，逐条等价。"""
+        return [self.embed_query(t) for t in texts]
 
 
 def create_embedder(**kwargs):

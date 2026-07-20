@@ -17,6 +17,7 @@ import fnmatch
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from .embedder import Embedder
 from .expander import create_expander
@@ -362,7 +363,10 @@ class Retriever:
         把调用者/被调用者作为关联结果附加（带 relation 字段）。
         """
         # 1. 向量召回 + 2. BM25 召回（原查询）
-        q_emb = self.embedder.embed_query(query)
+        # 复合查询提前拆分，主查询 + 子查询合批一次 embed（省 N-1 次往返）
+        subs = self._compound_subqueries(query)
+        embs = self.embedder.embed_queries([query, *subs])
+        q_emb, sub_embs = embs[0], embs[1:]
         rank_lists = [
             [cid for cid, _ in self.store.search_vector(q_emb, top_k)],
             [cid for cid, _ in self.store.search_fts(query, top_k)],
@@ -393,11 +397,9 @@ class Retriever:
                 weights.append(weights[0])
         # 2.9 复合意图拆分（"生成+清理"）：单次向量召回对双动作查询天然偏科，
         #     各子查询独立召回后低权重并入 RRF，两个意图都能拿到席位
-        subs = self._compound_subqueries(query)
         min_sub = _COMPOUND_SUB_MIN_SCORE.get(self.rerank_backend, _COMPOUND_SUB_MIN_DEFAULT)
         sub_probes: list[list[int]] = []  # 每个子查询自己的前 N 名（保底探针/分数混合用）
-        for sub in subs:
-            s_emb = self.embedder.embed_query(sub)
+        for sub, s_emb in zip(subs, sub_embs):
             sub_lists = [[cid for cid, _ in self.store.search_vector(s_emb, top_k)]]
             sub_fts = (
                 self.store.search_fts_trigram(sub, top_k)
@@ -451,14 +453,13 @@ class Retriever:
                 # 改为整句 top × 子查询相对强度，两后端语义一致：
                 # 子查询的最佳代表 ≈ 整句最佳的 _COMPOUND_SUB_RERANK_MIX 折
                 full_top = max((c.get("score", 0.0) for c in candidates), default=0.0)
-                for sub, probe in zip(subs, sub_probes):
-                    sub_cands = [by_id[cid] for cid in probe if cid in by_id]
-                    if not sub_cands:
-                        continue
-                    try:
-                        scored = self._rerank(sub, sub_cands, len(sub_cands))
-                    except Exception:
-                        continue
+                tasks = [
+                    (sub, [by_id[cid] for cid in probe if cid in by_id])
+                    for sub, probe in zip(subs, sub_probes)
+                ]
+                tasks = [(s, c) for s, c in tasks if c]
+                scored_lists = self._rerank_many(tasks)
+                for (sub, _), scored in zip(tasks, scored_lists):
                     sub_top = max((s["score"] for s in scored), default=0.0)
                     for s in scored:
                         c = by_id.get(s.get("id"))
@@ -672,6 +673,22 @@ class Retriever:
             for rank, doc_id in enumerate(ranks):
                 scores[doc_id] = scores.get(doc_id, 0.0) + w / (k + rank + 1)
         return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+    def _rerank_many(self, tasks: list[tuple[str, list[dict]]]) -> list[list[dict]]:
+        """批量 rerank（子查询分数混合用），失败项降级为空列表。
+
+        多个子查询并行发送（纯网络 IO，省一次往返延迟）；
+        评测限速场景（SCM_RERANK_MIN_INTERVAL>0）保持串行，不破坏全局请求间隔。"""
+        def one(sub: str, cands: list[dict]) -> list[dict]:
+            try:
+                return self._rerank(sub, cands, len(cands))
+            except Exception:
+                return []
+
+        if len(tasks) > 1 and _rerank_min_interval() <= 0:
+            with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+                return list(ex.map(lambda t: one(*t), tasks))
+        return [one(s, c) for s, c in tasks]
 
     def _rerank(self, query: str, candidates: list[dict], top_n: int) -> list[dict]:
         docs = [self._doc_text(c) for c in candidates]

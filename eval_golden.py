@@ -226,8 +226,11 @@ def _run_java_probes() -> list[dict]:
     if JAVA_TARGET is None:
         print("\n[K 类] 跳过：本地探针集不存在（eval_local_probes.py，不随仓库分发）")
         return []
-    # 复合 query 每条多发 1-2 次子查询 rerank，独立调用本函数时同样要节流
-    os.environ.setdefault("SCM_RERANK_MIN_INTERVAL", "6.2")
+    # 复合 query 每条多发 1-2 次子查询 rerank；Cohere 试用 key 限速 10 次/分钟
+    # 时必须节流。默认后端 Voyage 无此限制（与 main() 同条件，无脑节流会让
+    # 每条 rerank 白等 6.2s，K 类单条延迟虚高到 13s+）
+    if os.getenv("SCM_RERANK_BACKEND", "auto").lower() == "cohere":
+        os.environ.setdefault("SCM_RERANK_MIN_INTERVAL", "6.2")
     embedder = create_embedder()
     target = str(JAVA_TARGET.resolve())
     h = hashlib.sha256(f"{target}|{embedder.output_dtype}".encode("utf-8")).hexdigest()[:16]
@@ -253,7 +256,7 @@ def _run_java_probes() -> list[dict]:
                     "latency": round(elapsed, 2)})
         rows.append(row)
         mark = f"rank={row['rank']}" if row["rank"] else ("USABLE" if row["usable"] else "MISS")
-        print(f"  [K] [{mark:>7}] {item['query'][:60]}")
+        print(f"  [K] [{mark:>7}] {row['latency']:.2f}s {item['query'][:60]}")
     store.close()
     n = len(rows)
     print(f"  [K 小计] Top-1 {sum(r['top1'] for r in rows) / n:.0%} | "
