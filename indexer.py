@@ -135,7 +135,12 @@ def _embed_text(chunk, root: Path) -> str:
     try:
         fp = str(Path(fp).relative_to(root))
     except (ValueError, TypeError):
-        pass
+        # 路径形式不一致（Windows 8.3 短路径等）时 resolve 归一重试：
+        # embed 文本必须与索引侧一致，否则同一块产生两种向量（检索漂移）
+        try:
+            fp = str(Path(fp).resolve().relative_to(root))
+        except (ValueError, TypeError, OSError):
+            pass
     if fp:
         parts.append(f"# File: {fp}")
     if chunk.symbol:
