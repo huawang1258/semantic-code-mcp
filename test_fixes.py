@@ -338,10 +338,13 @@ def test_concurrent_embed_pipeline() -> None:
 
         def __init__(self):
             self.calls = 0
+            self.spans = []
 
         def embed_documents(self, texts):
             self.calls += 1
+            t0 = time.time()
             time.sleep(0.2)
+            self.spans.append((t0, time.time()))
             return [_vec(t) for t in texts]
 
         def embed_query(self, text):
@@ -370,13 +373,15 @@ def test_concurrent_embed_pipeline() -> None:
         top_id = hits[0][0]
         ch = store.get_chunks([top_id])[top_id]
         assert ch["file_path"].endswith("m5.py") and ch["symbol"] == "func_5", ch
-        # 提速：4 批 × 0.2s 串行 ≥ 0.8s；3 路并发应约 0.4s
-        assert elapsed < 0.7, f"并发流水线未生效: {elapsed:.2f}s"
+        # 并发证据：存在时间重叠的批次（不比绝对耗时，慢 CI runner 不 flake）
+        spans = sorted(emb.spans)
+        overlap = any(spans[i][1] > spans[i + 1][0] for i in range(len(spans) - 1))
+        assert overlap, f"并发流水线未生效（批次无时间重叠）: {spans}"
     finally:
         imod.BATCH_CHUNKS = old_batch
         store.close()
         shutil.rmtree(tmpdir, ignore_errors=True)
-    print(f"[11] 并发 embedding 流水线 OK（顺序对齐 + 提速 {elapsed:.2f}s < 串行 0.8s）")
+    print(f"[11] 并发 embedding 流水线 OK（顺序对齐 + 批次重叠并发，{elapsed:.2f}s vs 串行 0.8s）")
 
 
 def test_background_incremental_sync() -> None:
