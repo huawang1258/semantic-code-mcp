@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -e .
       - name: Run regression tests (no real API calls)
         env:
           VOYAGE_API_KEY: dummy-ci

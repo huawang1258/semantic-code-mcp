@@ -11,13 +11,13 @@ import random
 import shutil
 import tempfile
 
-from chunker import chunk_file
-from store import CodeStore
+from semantic_code_mcp.chunker import chunk_file
+from semantic_code_mcp.store import CodeStore
 
 
 def main() -> None:
     # ---------- 1. chunker ----------
-    chunks = chunk_file("chunker.py")
+    chunks = chunk_file("src/semantic_code_mcp/chunker.py")
     assert chunks, "chunker 未切出任何块"
     print(f"[chunker] chunker.py 切出 {len(chunks)} 个代码块，前 5 个：")
     for c in chunks[:5]:

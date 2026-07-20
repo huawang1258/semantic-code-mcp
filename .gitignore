@@ -23,3 +23,6 @@ eval_result_scm.json
 
 # 临时探针脚本
 _probe*.py
+
+dist/
+*.egg-info/

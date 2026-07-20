@@ -24,11 +24,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 from mcp.server.fastmcp import Context, FastMCP
 
-from embedder import create_embedder
-from workspace import WorkspaceManager
+from .embedder import create_embedder
+from .workspace import WorkspaceManager
 
-# MCP 由 IDE 启动时 CWD 不定，.env 固定从本文件所在目录加载
-load_dotenv(Path(__file__).parent / ".env")
+# MCP 由 IDE 启动时 CWD 不定：先按 CWD 向上搜 .env（pip/uvx 安装场景，
+# key 通常来自 MCP 客户端 env 配置，此步多为 no-op），再从仓库根加载（源码运行场景）
+load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 # 日志只写本地文件（MCP_HANG_PROOF_DESIGN 原则 2）：
 # host 不消费 stderr 时 64KB pipe buffer 写满会同步阻塞进程，

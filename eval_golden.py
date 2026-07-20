@@ -33,11 +33,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from embedder import create_embedder
-from expander import QueryExpander
-from indexer import Indexer
-from retriever import Retriever
-from store import CodeStore
+from semantic_code_mcp.embedder import create_embedder
+from semantic_code_mcp.expander import QueryExpander
+from semantic_code_mcp.indexer import Indexer
+from semantic_code_mcp.retriever import Retriever
+from semantic_code_mcp.store import CodeStore
 
 load_dotenv()
 

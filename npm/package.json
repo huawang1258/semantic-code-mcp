@@ -1,0 +1,31 @@
+{
+  "name": "semantic-code-mcp",
+  "version": "0.1.0",
+  "description": "Semantic code search MCP server: Tree-sitter AST chunking + voyage-code-3 embeddings + hybrid retrieval (sqlite-vec + FTS5 + RRF) + Voyage rerank-2.5 + call graph expansion. Thin npx wrapper that launches the Python package via uvx.",
+  "bin": {
+    "semantic-code-mcp": "bin.js"
+  },
+  "files": [
+    "bin.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "semantic-search",
+    "code-search",
+    "rag",
+    "tree-sitter",
+    "embeddings"
+  ],
+  "author": "huawang1258",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huawang1258/semantic-code-mcp.git"
+  },
+  "homepage": "https://github.com/huawang1258/semantic-code-mcp#readme"
+}

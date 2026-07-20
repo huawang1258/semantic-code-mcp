@@ -18,9 +18,9 @@ import os
 import re
 import time
 
-from embedder import Embedder
-from expander import create_expander
-from store import CodeStore, _is_boilerplate_symbol
+from .embedder import Embedder
+from .expander import create_expander
+from .store import CodeStore, _is_boilerplate_symbol
 
 try:
     import cohere

@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from embedder import Embedder
-from workspace import WorkspaceManager
+from semantic_code_mcp.embedder import Embedder
+from semantic_code_mcp.workspace import WorkspaceManager
 
 
 def main() -> None:

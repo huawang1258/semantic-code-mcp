@@ -18,12 +18,12 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
-from chunker import EXT_TO_LANG
-from embedder import Embedder
-from indexer import Indexer
-from retriever import Retriever
-from store import CodeStore
-from watcher import FileWatcher
+from .chunker import EXT_TO_LANG
+from .embedder import Embedder
+from .indexer import Indexer
+from .retriever import Retriever
+from .store import CodeStore
+from .watcher import FileWatcher
 
 logger = logging.getLogger("semantic-code-mcp")
 

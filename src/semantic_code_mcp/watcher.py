@@ -15,7 +15,7 @@ from typing import Callable
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from indexer import DEFAULT_IGNORE_DIRS, FORCE_INCLUDE_FILENAMES
+from .indexer import DEFAULT_IGNORE_DIRS, FORCE_INCLUDE_FILENAMES
 
 # debounce 间隔（秒）
 DEBOUNCE_SECONDS = 2.0

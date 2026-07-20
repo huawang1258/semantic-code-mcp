@@ -15,9 +15,9 @@ from typing import Callable
 
 import pathspec
 
-from chunker import EXT_TO_LANG, chunk_file
-from embedder import Embedder
-from store import CodeStore
+from .chunker import EXT_TO_LANG, chunk_file
+from .embedder import Embedder
+from .store import CodeStore
 
 logger = logging.getLogger("semantic-code-mcp")
 

@@ -13,7 +13,7 @@ import sqlite3
 
 import sqlite_vec
 
-from chunker import CodeChunk
+from .chunker import CodeChunk
 
 
 # FTS5 query 至少保留长度 >= 此值的 token

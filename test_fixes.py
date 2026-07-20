@@ -18,10 +18,10 @@ from pathlib import Path
 os.environ.setdefault("SCM_WATCH", "0")
 os.environ.setdefault("VOYAGE_API_KEY", os.getenv("VOYAGE_API_KEY", "dummy-key-for-offline-test"))
 
-from chunker import chunk_file
-from indexer import Indexer
-from retriever import Retriever
-from store import CodeStore
+from semantic_code_mcp.chunker import chunk_file
+from semantic_code_mcp.indexer import Indexer
+from semantic_code_mcp.retriever import Retriever
+from semantic_code_mcp.store import CodeStore
 
 
 def test_fts_migration_backfill() -> None:
@@ -29,7 +29,7 @@ def test_fts_migration_backfill() -> None:
     db_path = os.path.join(tmpdir, "t.db")
     dim = 8
     store = CodeStore(db_path, dim)
-    chunks = chunk_file("chunker.py")
+    chunks = chunk_file("src/semantic_code_mcp/chunker.py")
     embs = [[random.random() for _ in range(dim)] for _ in chunks]
     store.add_chunks(chunks, embs)
     store.close()
@@ -126,7 +126,7 @@ def test_per_file_diversity() -> None:
 
 
 def test_format_results_grouping() -> None:
-    from server import _format_results
+    from semantic_code_mcp.server import _format_results
 
     results = [
         {"file_path": "a.go", "symbol": "Foo", "start_line": 10, "end_line": 11,
@@ -164,7 +164,7 @@ def test_format_results_grouping() -> None:
 
 
 def test_caller_intent_and_barrel() -> None:
-    import retriever as rmod
+    import semantic_code_mcp.retriever as rmod
 
     # 意图正则：中英文都能命中
     assert rmod._CALLER_INTENT_RE.search("buildToolPlan 被哪些文件调用了？")
@@ -181,7 +181,7 @@ def test_caller_intent_and_barrel() -> None:
     assert fused[0][0] == 1, fused
 
     # 查询扩展器：JSON 解析容忍 fence，未配置时禁用
-    from expander import QueryExpander, create_expander
+    from semantic_code_mcp.expander import QueryExpander, create_expander
 
     parsed = QueryExpander._parse('```json\n{"variants": ["a", "b"], "hypothetical_code": "func X() {}"}\n```')
     assert parsed == {"variants": ["a", "b"], "hyde": "func X() {}"}, parsed
@@ -201,7 +201,7 @@ def test_caller_intent_and_barrel() -> None:
     assert Retriever._is_barrel_file("pkg\\__init__.py")
     assert not Retriever._is_barrel_file("src/tools/planner.ts")
     # 非代码乘数：文档意图 > 配置意图 > 默认降权；代码文件恒为 1
-    from retriever import _NON_CODE_PENALTY
+    from semantic_code_mcp.retriever import _NON_CODE_PENALTY
 
     assert Retriever._noncode_mult("go", False, True) == 1.0
     assert Retriever._noncode_mult("yaml", False, False) == _NON_CODE_PENALTY
@@ -212,7 +212,7 @@ def test_caller_intent_and_barrel() -> None:
     # 端到端：用真实 store 验证 callers_of 路由（chunker.py 里的函数互相调用）
     tmpdir = tempfile.mkdtemp()
     store = CodeStore(os.path.join(tmpdir, "t.db"), 8)
-    chunks = chunk_file("chunker.py")
+    chunks = chunk_file("src/semantic_code_mcp/chunker.py")
     store.add_chunks(chunks, [[random.random() for _ in range(8)] for _ in chunks])
     callers = store.callers_of("_get_parser")
     assert callers, "callers_of 应命中 chunk_file -> _get_parser 调用边"
@@ -254,8 +254,8 @@ def test_caller_intent_and_barrel() -> None:
 
 
 def test_workspace_get_race() -> None:
-    from embedder import Embedder
-    from workspace import WorkspaceManager
+    from semantic_code_mcp.embedder import Embedder
+    from semantic_code_mcp.workspace import WorkspaceManager
 
     tmpdir = tempfile.mkdtemp()
     db_dir = tempfile.mkdtemp()
@@ -287,8 +287,8 @@ def test_workspace_get_race() -> None:
 
 def test_expander_prompt_and_parse() -> None:
     """expander 的 prompt 构建（含字面 JSON 大括号）与响应解析。"""
-    import expander as emod
-    from expander import QueryExpander
+    import semantic_code_mcp.expander as emod
+    from semantic_code_mcp.expander import QueryExpander
 
     e = QueryExpander(base_url="http://fake", api_key="k", model="m")
     assert e.enabled
@@ -323,9 +323,9 @@ def test_concurrent_embed_pipeline() -> None:
     """并发 embedding 流水线：向量-块顺序对齐 + 并发确实快于串行。"""
     import hashlib as _h
 
-    import indexer as imod
-    from chunker import chunk_file as _cf
-    from indexer import Indexer, _embed_text
+    import semantic_code_mcp.indexer as imod
+    from semantic_code_mcp.chunker import chunk_file as _cf
+    from semantic_code_mcp.indexer import Indexer, _embed_text
 
     def _vec(t: str) -> list[float]:
         d = _h.sha256(t.encode("utf-8")).digest()
@@ -388,8 +388,8 @@ def test_background_incremental_sync() -> None:
     """watcher 变更 → debounce → 后台主动增量同步（不依赖查询触发）。"""
     import random as _r
 
-    import watcher as wmod
-    from workspace import WorkspaceManager
+    import semantic_code_mcp.watcher as wmod
+    from semantic_code_mcp.workspace import WorkspaceManager
 
     class StubEmb:
         dim = 8
