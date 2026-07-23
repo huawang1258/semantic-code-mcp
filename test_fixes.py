@@ -548,6 +548,71 @@ def test_dot_dir_allowlist() -> None:
     print("[12] 点目录白名单 OK（.github 进索引，.git 排除）")
 
 
+def test_local_embedder_concurrency() -> None:
+    """LocalEmbedder 并发安全：推理串行、同 key 只算一次、缓存有界、无竞态。
+
+    用 stub 替代 SentenceTransformer，不下模型不出网。
+    """
+    import threading as th
+    from collections import OrderedDict
+
+    from semantic_code_mcp.embedder import LocalEmbedder
+
+    class _Vec:
+        def __init__(self, x): self.x = x
+        def tolist(self): return [self.x]
+
+    class _Stub:
+        def __init__(self):
+            self.calls = 0
+            self.active = 0
+            self.max_active = 0
+            self.guard = th.Lock()
+        def encode(self, texts, **kwargs):
+            with self.guard:
+                self.calls += 1
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.01)
+            with self.guard:
+                self.active -= 1
+            return [_Vec(1.0) for _ in texts]
+
+    emb = LocalEmbedder.__new__(LocalEmbedder)
+    emb.st = _Stub()
+    emb._query_prompt = None
+    emb._query_cache = OrderedDict()
+    emb._query_cache_max = 32
+    emb._cache_lock = th.Lock()
+    emb._encode_lock = th.Lock()
+
+    errors: list[str] = []
+    out: list[list[float]] = []
+    barrier = th.Barrier(16)
+
+    def worker(i: int) -> None:
+        try:
+            barrier.wait()
+            # 前 8 线程同一 key（验 double-check 去重），后 8 线程各自独立 key
+            out.append(emb.embed_query("same" if i < 8 else f"q{i}"))
+        except Exception as e:  # noqa: BLE001
+            errors.append(repr(e))
+
+    threads = [th.Thread(target=worker, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"并发异常: {errors}"
+    assert len(out) == 16
+    assert emb.st.max_active == 1, f"encode 应串行，实测并发 {emb.st.max_active}"
+    # 同 key 8 次只算 1 次 + 独立 key 8 次 = 9
+    assert emb.st.calls == 9, f"同 key 应去重，实测 encode {emb.st.calls} 次"
+    assert len(emb._query_cache) == 9 <= emb._query_cache_max
+    print("[13] LocalEmbedder 并发 OK（推理串行 + 同 key 只算一次 + 无竞态）")
+
+
 if __name__ == "__main__":
     test_fts_migration_backfill()
     test_scope_pattern()
@@ -563,4 +628,5 @@ if __name__ == "__main__":
     test_replace_file_atomic()
     test_profile_check()
     test_dot_dir_allowlist()
+    test_local_embedder_concurrency()
     print("\nOK 回归测试全部通过")

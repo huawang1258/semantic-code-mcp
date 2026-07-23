@@ -205,6 +205,12 @@ class LocalEmbedder:
         if self._query_prompt:
             kwargs["prompt_name"] = self._query_prompt
         with self._encode_lock:
+            # double-check：排队等锁期间同 key 可能已被先行线程算完，
+            # 不查会让 N 个并发同 key 请求重复推理 N 次（本地模型延迟放大）
+            with self._cache_lock:
+                if text in self._query_cache:
+                    self._query_cache.move_to_end(text)
+                    return self._query_cache[text]
             result = self.st.encode([text[:_MAX_CHARS_PER_TEXT]], **kwargs)[0].tolist()
         with self._cache_lock:
             self._query_cache[text] = result
