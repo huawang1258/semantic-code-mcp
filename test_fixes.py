@@ -601,8 +601,10 @@ def test_local_embedder_concurrency() -> None:
     threads = [th.Thread(target=worker, args=(i,)) for i in range(16)]
     for t in threads:
         t.start()
+    # timeout：将来若引入死锁，快速失败而不是挂死 CI 到 workflow 总超时
     for t in threads:
-        t.join()
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads), "疑似死锁：有线程超时未退出"
 
     assert not errors, f"并发异常: {errors}"
     assert len(out) == 16
