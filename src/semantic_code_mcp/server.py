@@ -8,7 +8,7 @@
   - 多工作区 LRU 管理（SCM_MAX_WORKSPACES，默认 8）
   - watchdog 文件监控 + 2s debounce（SCM_WATCH=0 禁用）
   - MCP progress notification（索引进度实时回报）
-  - Cancel signal 支持（客户端取消即刻中止）
+  - 协程级取消（取消后立即返回；已在飞的索引批次后台跑完并持久化，不丢数据）
   - 首次全量索引 / 后续 watcher 增量（O(变更数) 极速）
 """
 from __future__ import annotations

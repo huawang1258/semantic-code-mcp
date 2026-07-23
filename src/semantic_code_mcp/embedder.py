@@ -65,6 +65,9 @@ class Embedder:
         self._dim: int | None = None
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._query_cache_max = 32
+        # 缓存锁：多 workspace 并发检索共享同一 Embedder，OrderedDict 读改
+        # 无锁会在淘汰竞态下 KeyError（重复 miss 多发一次请求可接受，无害）
+        self._cache_lock = threading.Lock()
 
     @property
     def dim(self) -> int:
@@ -89,17 +92,24 @@ class Embedder:
         复合查询主查询 + 子查询合并成一次请求（省 N-1 次网络往返）；
         命中缓存的不重发，只有未命中子集上行。
         """
-        missing = [t for t in dict.fromkeys(texts) if t not in self._query_cache]
+        with self._cache_lock:
+            cached = {t: self._query_cache[t] for t in texts if t in self._query_cache}
+            for t in cached:
+                self._query_cache.move_to_end(t)
+        missing = [t for t in dict.fromkeys(texts) if t not in cached]
+        fresh: dict[str, list[float]] = {}
         if missing:
+            # 网络调用在锁外：持锁发请求会把并发查询串行化
             for t, vec in zip(missing, self._embed(missing, "query")):
-                self._query_cache[t] = vec
-                if len(self._query_cache) > self._query_cache_max:
+                fresh[t] = vec
+            with self._cache_lock:
+                for t, vec in fresh.items():
+                    self._query_cache[t] = vec
+                    self._query_cache.move_to_end(t)
+                while len(self._query_cache) > self._query_cache_max:
                     self._query_cache.popitem(last=False)
-        out: list[list[float]] = []
-        for t in texts:
-            self._query_cache.move_to_end(t)
-            out.append(self._query_cache[t])
-        return out
+        # 输出只从本地快照组装，不依赖缓存在锁外的存活性（并发淘汰不影响正确性）
+        return [cached[t] if t in cached else fresh[t] for t in texts]
 
     def _embed(self, texts: list[str], input_type: str) -> list[list[float]]:
         results: list[list[float]] = []

@@ -4,7 +4,7 @@
 
 「效果优先」技术栈：**Tree-sitter AST 切分 + voyage-code-3 embedding（int8 量化）+ sqlite-vec 向量库 + BM25 全文 + RRF 融合 + Voyage rerank-2.5 重排 + Call Graph 图扩展**。一个 `VOYAGE_API_KEY` 跑通 embedding + rerank 全链路。
 
-工程特性：**watchdog 文件实时监控 + 多工作区 LRU 管理 + MCP progress notification + cancel signal**。
+工程特性：**watchdog 文件实时监控 + 多工作区 LRU 管理 + MCP progress notification + 协程级取消**（取消后立即返回；已在飞的索引批次在后台跑完并持久化，不丢数据也不重复计费重建）。
 
 ## 架构
 
@@ -22,7 +22,7 @@ codebase_search(query, dir)
   Retriever ── 向量召回 + BM25召回 ── RRF融合 ── rerank（Voyage/Cohere）── Call Graph扩展 ── top_n 代码片段
         │
         ▼
-  MCP Server ── async tools + progress notification + cancel signal
+  MCP Server ── async tools + progress notification + 协程级取消
 ```
 
 | 模块 | 职责 |

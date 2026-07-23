@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -125,7 +126,9 @@ LINE_OVERLAP = 10
 MIN_CHUNK_LINES = 3
 MIN_CHUNK_CHARS = 40
 
-_PARSER_CACHE: dict = {}
+# per-thread parser 缓存：tree-sitter Parser 对象非线程安全，多 workspace
+# 并发 sync 时共享同一 parser 会产生数据竞争（错误解析/崩溃）
+_PARSER_TLS = threading.local()
 
 
 @dataclass
@@ -170,9 +173,12 @@ _LANG_MODULES = {
 
 
 def _get_parser(lang: str):
-    """获取并缓存 parser，失败返回 None（该语言回退按行切）。"""
-    if lang in _PARSER_CACHE:
-        return _PARSER_CACHE[lang]
+    """获取并缓存 parser（每线程独立），失败返回 None（该语言回退按行切）。"""
+    cache = getattr(_PARSER_TLS, "cache", None)
+    if cache is None:
+        cache = _PARSER_TLS.cache = {}
+    if lang in cache:
+        return cache[lang]
     parser = None
     spec = _LANG_MODULES.get(lang)
     if spec is not None:
@@ -183,7 +189,7 @@ def _get_parser(lang: str):
             parser = Parser(language)
         except Exception:
             parser = None
-    _PARSER_CACHE[lang] = parser
+    cache[lang] = parser
     return parser
 
 

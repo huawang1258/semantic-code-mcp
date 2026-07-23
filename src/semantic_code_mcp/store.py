@@ -38,6 +38,12 @@ def _is_boilerplate_symbol(name: str) -> bool:
     return bool(_ACCESSOR_RE.match(name)) or name in _BOILERPLATE_NAMES
 
 
+# 索引格式版本：切块算法 / embed 上下文文本格式（_embed_text）变更时必须 bump。
+# 文件 hash 没变不代表块/向量还有效：切块边界或上下文头变了，旧块与新块
+# 不可比，必须拒绝静默混用（由 _check_profile 拦截并提示重建）。
+INDEX_FORMAT = "1"
+
+
 class CodeStore:
     """单个工作区的索引存储。"""
 
@@ -69,13 +75,21 @@ class CodeStore:
         cur = self.db.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         rows = dict(cur.execute("SELECT key, value FROM meta").fetchall())
-        want = {"embed_model": embed_model, "dim": str(self.dim), "dtype": self.dtype}
+        want = {
+            "embed_model": embed_model,
+            "dim": str(self.dim),
+            "dtype": self.dtype,
+            "index_format": INDEX_FORMAT,
+        }
         has_chunks = bool(cur.execute("SELECT 1 FROM chunks LIMIT 1").fetchone())
         for key, val in want.items():
             if key == "embed_model" and not val:
                 continue
             old = rows.get(key)
             if old is None:
+                # 缺失时认领当前值：仅对「库确实由当前算法/模型构建」成立。
+                # 历史上 chunker/默认模型从未变过，认领事实正确；今后变更
+                # 必须 bump INDEX_FORMAT/换模型名，让不匹配分支拦住旧库。
                 cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, val))
             elif old != val and has_chunks:
                 self.db.commit()
@@ -223,6 +237,13 @@ class CodeStore:
 
     def _insert_chunk_rows(self, cur, chunks: list[CodeChunk], embeddings: list[list[float]]) -> int:
         """插入 chunk 相关全部行（chunks/vec/fts/edges），不 commit（由调用方控制事务）。"""
+        if len(chunks) != len(embeddings):
+            # zip 静默截断是数据完整性事故：供应商少返回向量时部分写入
+            # + 指纹照更新 = 永久静默缺索引。抱错让 replace_file 整体回滚，
+            # 下次 sync 重试该文件。
+            raise ValueError(
+                f"chunks({len(chunks)}) 与 embeddings({len(embeddings)}) 数量不一致，拒绝部分写入"
+            )
         added = 0
         for chunk, emb in zip(chunks, embeddings):
             cur.execute(

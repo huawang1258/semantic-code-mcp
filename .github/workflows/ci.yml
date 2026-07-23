@@ -20,8 +20,26 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -e .
-      - name: Run regression tests (no real API calls)
+      - name: Run infra smoke tests (chunker + sqlite-vec + FTS5)
         env:
           VOYAGE_API_KEY: dummy-ci
           PYTHONUTF8: "1"  # Windows runner 默认 cp1252，中文输出会 UnicodeEncodeError
+        run: python test_basic.py
+      - name: Run regression tests (no real API calls)
+        env:
+          VOYAGE_API_KEY: dummy-ci
+          PYTHONUTF8: "1"
         run: python test_fixes.py
+
+  build-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python wheel + sdist build
+        run: pip install build && python -m build
+      - name: npm pack smoke (薄壳完整性)
+        working-directory: npm
+        run: npm pack --dry-run

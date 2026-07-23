@@ -43,6 +43,9 @@ SKIP_FILENAMES = {
 }
 # agent 指导文件：架构/规范信息密度最高，很多仓库把它们 gitignore 了，索引时豁免
 FORCE_INCLUDE_FILENAMES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "AGENT.md", ".windsurfrules", ".cursorrules"}
+# 点目录白名单：隐藏目录默认全排除，但 CI workflow / agent 配置的检索价值高
+# （"发布流程在哪定义"类查询必需）；仍受 gitignore 约束
+DOT_DIR_ALLOWLIST = {".github", ".gitlab", ".windsurf", ".devin", ".claude", ".cursor", ".codex", ".agent"}
 # 单批 embedding 的最大累计块数（跨文件合并，减少 API 往返）
 BATCH_CHUNKS = 256
 
@@ -189,7 +192,8 @@ class Indexer:
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = [
                 d for d in dirnames
-                if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")
+                if d not in DEFAULT_IGNORE_DIRS
+                and (not d.startswith(".") or d in DOT_DIR_ALLOWLIST)
             ]
             if ".gitignore" in filenames:
                 gi = Path(dirpath) / ".gitignore"
@@ -242,10 +246,11 @@ class Indexer:
 
     def _iter_source_files(self):
         for dirpath, dirnames, filenames in os.walk(self.root):
-            # 原地过滤忽略目录与隐藏目录
+            # 原地过滤忽略目录与隐藏目录（白名单内的点目录放行）
             dirnames[:] = [
                 d for d in dirnames
-                if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")
+                if d not in DEFAULT_IGNORE_DIRS
+                and (not d.startswith(".") or d in DOT_DIR_ALLOWLIST)
             ]
             for fn in filenames:
                 p = Path(dirpath) / fn

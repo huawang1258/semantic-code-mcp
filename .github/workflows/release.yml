@@ -28,6 +28,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Run tests before publish (发布门禁)
+        env:
+          VOYAGE_API_KEY: dummy-ci
+          PYTHONUTF8: "1"
+        run: |
+          pip install -e .
+          python test_basic.py
+          python test_fixes.py
       - run: pip install build && python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
 

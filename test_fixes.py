@@ -466,9 +466,17 @@ def test_replace_file_atomic() -> None:
     store.replace_file(fp, [], [], "hash-v3")
     assert store.stats()["chunks"] == 0, "空替换应清掉旧行"
     assert store.get_file_hash(fp) == "hash-v3"
+
+    # chunks/embeddings 不等长：拒绝部分写入（zip 静默截断 = 永久缺索引）
+    try:
+        store.replace_file(fp, chunks, embs[:-1], "hash-v4")
+        raise AssertionError("不等长应拒绝写入")
+    except ValueError:
+        pass
+    assert store.get_file_hash(fp) == "hash-v3", "不等长失败后指纹不应更新（回滚）"
     store.close()
     shutil.rmtree(tmpdir, ignore_errors=True)
-    print("[10] replace_file 原子性 + WAL OK（失败回滚 / 空替换清行）")
+    print("[10] replace_file 原子性 + WAL OK（失败回滚 / 空替换清行 / 不等长拒写）")
 
 
 def test_profile_check() -> None:
@@ -501,8 +509,43 @@ def test_profile_check() -> None:
     # 空 model（fake embedder 测试场景）：跳过模型名校验，dim 一致即可
     s3 = CodeStore(db_path, 8)
     s3.close()
+
+    # index_format 不匹配：切块/上下文算法升级后旧库必须被拦住
+    db = sqlite3.connect(db_path)
+    db.execute("UPDATE meta SET value = '0' WHERE key = 'index_format'")
+    db.commit()
+    db.close()
+    try:
+        CodeStore(db_path, 8, embed_model="voyage-code-3")
+        raise AssertionError("index_format 不匹配应报错")
+    except RuntimeError as e:
+        assert "index_format" in str(e)
     shutil.rmtree(tmpdir, ignore_errors=True)
-    print("[11] 索引 profile 校验 OK（换模型/维度拒绝，同配置/空模型放行）")
+    print("[11] 索引 profile 校验 OK（换模型/维度/格式拒绝，同配置/空模型放行）")
+
+
+def test_dot_dir_allowlist() -> None:
+    """白名单点目录（.github 等）应进索引；其余点目录（.git 等）仍排除。"""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        wf = Path(tmpdir) / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "release.yml").write_text("name: Release\n", encoding="utf-8")
+        secret = Path(tmpdir) / ".git"
+        secret.mkdir()
+        (secret / "config.py").write_text("x = 1\n", encoding="utf-8")
+        (Path(tmpdir) / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+        idx = Indexer.__new__(Indexer)
+        idx.root = Path(tmpdir).resolve()
+        idx._gitignore = None
+        files = {p.relative_to(idx.root).as_posix() for p in idx._iter_source_files()}
+        assert ".github/workflows/release.yml" in files, f"白名单点目录未进索引: {files}"
+        assert "a.py" in files
+        assert not any(f.startswith(".git/") for f in files), f".git 不应进索引: {files}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    print("[12] 点目录白名单 OK（.github 进索引，.git 排除）")
 
 
 if __name__ == "__main__":
@@ -519,4 +562,5 @@ if __name__ == "__main__":
     test_background_incremental_sync()
     test_replace_file_atomic()
     test_profile_check()
+    test_dot_dir_allowlist()
     print("\nOK 回归测试全部通过")
