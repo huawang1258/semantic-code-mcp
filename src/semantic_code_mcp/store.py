@@ -41,7 +41,7 @@ def _is_boilerplate_symbol(name: str) -> bool:
 class CodeStore:
     """单个工作区的索引存储。"""
 
-    def __init__(self, db_path: str, dim: int, dtype: str = "float") -> None:
+    def __init__(self, db_path: str, dim: int, dtype: str = "float", embed_model: str = "") -> None:
         self.db_path = db_path
         self.dim = dim
         self.dtype = dtype if dtype in ("float", "int8") else "float"
@@ -49,7 +49,44 @@ class CodeStore:
         self.db.enable_load_extension(True)
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)
+        # 跨进程治理：WAL 允许多进程并发读 + 单写不互斥读；busy_timeout 让并发写
+        # 排队等待而不是立即抛 SQLITE_BUSY（本机源码版 + uvx 发布版可能同时运行）
+        try:
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA busy_timeout=5000")
+        except Exception:
+            pass
         self._init_schema()
+        self._check_profile(embed_model)
+
+    def _check_profile(self, embed_model: str) -> None:
+        """索引 profile 校验：换 embedding 模型/维度后旧向量不可比，必须拒绝混用。
+
+        meta 表记录 (embed_model, dim, dtype)。不匹配时抛错并提示删库重建，
+        而不是静默把不同模型的向量混进同一个向量空间。embed_model 为空
+        （单元测试 fake embedder）时跳过模型名校验，但仍校验 dim/dtype。
+        """
+        cur = self.db.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        rows = dict(cur.execute("SELECT key, value FROM meta").fetchall())
+        want = {"embed_model": embed_model, "dim": str(self.dim), "dtype": self.dtype}
+        has_chunks = bool(cur.execute("SELECT 1 FROM chunks LIMIT 1").fetchone())
+        for key, val in want.items():
+            if key == "embed_model" and not val:
+                continue
+            old = rows.get(key)
+            if old is None:
+                cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, val))
+            elif old != val and has_chunks:
+                self.db.commit()
+                raise RuntimeError(
+                    f"索引 profile 不匹配：DB 的 {key}={old!r}，当前配置 {key}={val!r}。"
+                    f"不同 embedding 配置的向量不可混用，请删除索引文件后重建：{self.db_path}"
+                )
+            elif old != val:
+                # 库还是空的：直接更新 profile（如 fake 测试库先建后配）
+                cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, val))
+        self.db.commit()
 
     @staticmethod
     def _trigram_supported(cur) -> bool:
@@ -180,6 +217,12 @@ class CodeStore:
     def add_chunks(self, chunks: list[CodeChunk], embeddings: list[list[float]]) -> int:
         """批量写入代码块及其向量。blob_hash 重复的自动跳过。返回新增条数。"""
         cur = self.db.cursor()
+        added = self._insert_chunk_rows(cur, chunks, embeddings)
+        self.db.commit()
+        return added
+
+    def _insert_chunk_rows(self, cur, chunks: list[CodeChunk], embeddings: list[list[float]]) -> int:
+        """插入 chunk 相关全部行（chunks/vec/fts/edges），不 commit（由调用方控制事务）。"""
         added = 0
         for chunk, emb in zip(chunks, embeddings):
             cur.execute(
@@ -219,12 +262,16 @@ class CodeStore:
                     (chunk_id, callee),
                 )
             added += 1
-        self.db.commit()
         return added
 
     def delete_file(self, file_path: str) -> None:
         """删除某文件的所有代码块（向量 + 全文 + 元数据）。"""
         cur = self.db.cursor()
+        self._delete_file_rows(cur, file_path)
+        self.db.commit()
+
+    def _delete_file_rows(self, cur, file_path: str) -> None:
+        """删除某文件全部行，不 commit（由调用方控制事务）。"""
         rows = cur.execute("SELECT id FROM chunks WHERE file_path = ?", (file_path,)).fetchall()
         ids = [r[0] for r in rows]
         if ids:
@@ -235,7 +282,37 @@ class CodeStore:
                 cur.execute(f"DELETE FROM fts_chunks_tri WHERE rowid IN ({marks})", ids)
             cur.execute(f"DELETE FROM edges WHERE caller_id IN ({marks})", ids)
             cur.execute("DELETE FROM chunks WHERE file_path = ?", (file_path,))
-        self.db.commit()
+
+    def replace_file(
+        self,
+        file_path: str,
+        chunks: list[CodeChunk],
+        embeddings: list[list[float]],
+        file_hash: str,
+        mtime: float = 0.0,
+        size: int = 0,
+    ) -> int:
+        """单事务原子替换一个文件的索引：删旧行 + 插新行 + 更新指纹。
+
+        任何一步失败整体回滚，不会出现「旧数据已删、新数据未写、指纹还在」
+        的静默丢失状态（旧实现 delete/add/set_hash 三次独立 commit，进程在
+        中间崩溃会让该文件永远不被重新索引）。
+        """
+        cur = self.db.cursor()
+        try:
+            self._delete_file_rows(cur, file_path)
+            added = self._insert_chunk_rows(cur, chunks, embeddings)
+            cur.execute(
+                "INSERT INTO files (file_path, file_hash, mtime, size) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(file_path) DO UPDATE SET file_hash = excluded.file_hash, "
+                "mtime = excluded.mtime, size = excluded.size",
+                (file_path, file_hash, mtime, size),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        return added
 
     # ---------- 文件指纹（增量） ----------
 

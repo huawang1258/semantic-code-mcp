@@ -116,10 +116,10 @@ class _EmbedPipeline:
         offset = 0
         for fp, fh, mt, sz, cs in batch:
             n = len(cs)
-            if n:
-                store.add_chunks(cs, embeddings[offset:offset + n])
-                offset += n
-            store.set_file_hash(fp, fh, mtime=mt, size=sz)
+            # 单事务原子替换：删旧 + 插新 + 指纹，中途崩溃整体回滚，
+            # 不会出现旧数据已删但新数据未写的中间态
+            store.replace_file(fp, cs, embeddings[offset:offset + n], fh, mtime=mt, size=sz)
+            offset += n
         if self.on_write:
             self.on_write(len(batch), len(all_chunks))
 
@@ -308,7 +308,7 @@ class Indexer:
         buf_chunks = 0
         try:
             for done, (fp, fh, mt, sz) in enumerate(to_index, 1):
-                self.store.delete_file(fp)
+                # 不提前删旧数据：由 replace_file 在写回时单事务完成删+插
                 chunks = chunk_file(fp)
                 chunks_total += len(chunks)
                 buf.append((fp, fh, mt, sz, chunks))
@@ -397,7 +397,7 @@ class Indexer:
         buf_chunks = 0
         try:
             for done, (fp, fh, mt, sz) in enumerate(to_index, 1):
-                self.store.delete_file(fp)
+                # 不提前删旧数据：由 replace_file 在写回时单事务完成删+插
                 chunks = chunk_file(fp)
                 buf.append((fp, fh, mt, sz, chunks))
                 buf_chunks += len(chunks)

@@ -166,7 +166,8 @@ class WorkspaceManager:
     def _create_workspace(self, resolved: str) -> Workspace:
         """创建新的 workspace 实例。"""
         db_path = self._db_path_for(resolved)
-        store = CodeStore(db_path, self.embedder.dim, dtype=self.embedder.output_dtype)
+        store = CodeStore(db_path, self.embedder.dim, dtype=self.embedder.output_dtype,
+                          embed_model=getattr(self.embedder, "model", ""))
         # rerank 后端/模型由 Retriever 按 SCM_RERANK_BACKEND / SCM_RERANK_MODEL 自行选择
         retriever = Retriever(store, self.embedder)
         indexer = Indexer(resolved, store, self.embedder)

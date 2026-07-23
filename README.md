@@ -139,7 +139,16 @@ npx 用法把 `command/args` 换成 `"npx", ["-y", "semcode-mcp"]`；
 | Cohere（可选后端） | 查询文本 + top-50 候选代码块全文 | 仅 `SCM_RERANK_BACKEND=cohere` 时；默认零发送 |
 | 自配 LLM 端点（可选，默认关） | 仅查询文本（不含代码） | `SCM_QUERY_EXPANSION=on` 时 |
 
-供应商对 API 数据的保留/训练策略请以其当前条款为准自行评估（Voyage/Cohere 均声明 API 数据默认不用于训练，本项目不替其背书）。
+### ⚠️ Voyage 数据条款（重要，索引闭源代码前必读）
+
+按 Voyage [TOS](https://www.voyageai.com/tos) Section 3(iii)（2026-07 复核）：
+
+- **默认（opt-out 前）提交内容可被 Voyage 用于训练和改进模型**
+- Opt-out 需要：账户绑定支付方式 + 组织 Admin 身份，dashboard → Terms of Service → 底部 toggle 切到 Opted Out
+- Opt-out 后为 zero-day retention（处理完即删），但**不追溯**之前提交的数据，且免费额度可能被作废
+- Batch API 上传的文件会保留 30 天（本工具不使用 Batch API）
+
+**用于公司/闭源代码前，先完成 opt-out 或使用全本地模式。** Cohere（可选 rerank 后端）条款请自行评估。
 
 ### 始终留在本地的
 

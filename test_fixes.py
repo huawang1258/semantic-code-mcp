@@ -435,6 +435,76 @@ def test_background_incremental_sync() -> None:
     print("[9] 后台主动增量同步 OK（watcher → debounce → sync）")
 
 
+def test_replace_file_atomic() -> None:
+    """replace_file 原子性：中途失败必须整体回滚，旧数据和旧指纹完好。"""
+    tmpdir = tempfile.mkdtemp()
+    store = CodeStore(os.path.join(tmpdir, "t.db"), 8)
+    chunks = chunk_file("src/semantic_code_mcp/chunker.py")
+    embs = [[random.random() for _ in range(8)] for _ in chunks]
+    fp = chunks[0].file_path
+    store.replace_file(fp, chunks, embs, "hash-v1", mtime=1.0, size=100)
+    n_before = store.stats()["chunks"]
+    assert n_before and store.get_file_hash(fp) == "hash-v1"
+
+    # WAL 已启用（跨进程治理）
+    mode = store.db.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal", f"journal_mode={mode}，期望 wal"
+
+    # 中途失败：坏向量（维度不符触发 sqlite-vec 报错）
+    bad_embs = [[0.1, 0.2]] * len(chunks)  # dim=2 != 8
+    try:
+        store.replace_file(fp, chunks, bad_embs, "hash-v2", mtime=2.0, size=200)
+        raise AssertionError("坏向量应触发异常")
+    except AssertionError:
+        raise
+    except Exception:
+        pass  # 预期失败
+    assert store.stats()["chunks"] == n_before, "失败后旧 chunk 应完好（回滚）"
+    assert store.get_file_hash(fp) == "hash-v1", "失败后指纹不应更新（回滚）"
+
+    # 空 chunks 替换 = 清掉该文件全部索引（文件内容清空场景）
+    store.replace_file(fp, [], [], "hash-v3")
+    assert store.stats()["chunks"] == 0, "空替换应清掉旧行"
+    assert store.get_file_hash(fp) == "hash-v3"
+    store.close()
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    print("[10] replace_file 原子性 + WAL OK（失败回滚 / 空替换清行）")
+
+
+def test_profile_check() -> None:
+    """索引 profile 校验：换模型/维度拒绝打开，防不同向量空间静默混用。"""
+    tmpdir = tempfile.mkdtemp()
+    db_path = os.path.join(tmpdir, "t.db")
+    store = CodeStore(db_path, 8, embed_model="voyage-code-3")
+    chunks = chunk_file("src/semantic_code_mcp/chunker.py")
+    store.add_chunks(chunks, [[random.random() for _ in range(8)] for _ in chunks])
+    store.close()
+
+    # 同配置重开 OK
+    s2 = CodeStore(db_path, 8, embed_model="voyage-code-3")
+    s2.close()
+
+    # 换模型：拒绝
+    try:
+        CodeStore(db_path, 8, embed_model="voyage-4")
+        raise AssertionError("换模型应报 profile 不匹配")
+    except RuntimeError as e:
+        assert "profile" in str(e)
+
+    # 换维度：拒绝
+    try:
+        CodeStore(db_path, 16, embed_model="voyage-code-3")
+        raise AssertionError("换维度应报 profile 不匹配")
+    except RuntimeError as e:
+        assert "profile" in str(e)
+
+    # 空 model（fake embedder 测试场景）：跳过模型名校验，dim 一致即可
+    s3 = CodeStore(db_path, 8)
+    s3.close()
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    print("[11] 索引 profile 校验 OK（换模型/维度拒绝，同配置/空模型放行）")
+
+
 if __name__ == "__main__":
     test_fts_migration_backfill()
     test_scope_pattern()
@@ -447,4 +517,6 @@ if __name__ == "__main__":
     test_expander_prompt_and_parse()
     test_concurrent_embed_pipeline()
     test_background_incremental_sync()
+    test_replace_file_atomic()
+    test_profile_check()
     print("\nOK 回归测试全部通过")

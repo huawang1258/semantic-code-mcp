@@ -238,7 +238,8 @@ def _run_java_probes() -> list[dict]:
     if not db_path.exists():
         print(f"\n[K 类] 跳过：Java 探针仓库未索引（{db_path} 不存在）")
         return []
-    store = CodeStore(str(db_path), embedder.dim, dtype=embedder.output_dtype)
+    store = CodeStore(str(db_path), embedder.dim, dtype=embedder.output_dtype,
+                      embed_model=getattr(embedder, "model", ""))
     retriever = Retriever(store, embedder)
     print(f"\n[K 类] Java 探针回归（{JAVA_TARGET.name}，{len(JAVA_GOLDEN)} 条，expand_graph=开）")
     rows: list[dict] = []
@@ -288,7 +289,8 @@ def main() -> None:
     if os.getenv("SCM_RERANK_BACKEND", "auto").lower() == "cohere":
         os.environ.setdefault("SCM_RERANK_MIN_INTERVAL", "6.2")
     embedder = create_embedder()
-    store = CodeStore(DB_PATH, embedder.dim, dtype=embedder.output_dtype)
+    store = CodeStore(DB_PATH, embedder.dim, dtype=embedder.output_dtype,
+                      embed_model=getattr(embedder, "model", ""))
     indexer = Indexer(str(TARGET), store, embedder)
     expander = None
     if EXPAND:
