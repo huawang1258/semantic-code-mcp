@@ -176,6 +176,10 @@ class LocalEmbedder:
         self._dim: int | None = None
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._query_cache_max = 32
+        # 与 Embedder 同款缓存锁；另加 encode 串行锁——SentenceTransformer 推理
+        # 非线程安全，且 CPU 推理并发也无吞吐收益
+        self._cache_lock = threading.Lock()
+        self._encode_lock = threading.Lock()
 
     @property
     def dim(self) -> int:
@@ -185,23 +189,27 @@ class LocalEmbedder:
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         clipped = [(t or " ")[:_MAX_CHARS_PER_TEXT] for t in texts]
-        embs = self.st.encode(
-            clipped, batch_size=self.batch_size,
-            normalize_embeddings=True, show_progress_bar=False,
-        )
+        with self._encode_lock:
+            embs = self.st.encode(
+                clipped, batch_size=self.batch_size,
+                normalize_embeddings=True, show_progress_bar=False,
+            )
         return [e.tolist() for e in embs]
 
     def embed_query(self, text: str) -> list[float]:
-        if text in self._query_cache:
-            self._query_cache.move_to_end(text)
-            return self._query_cache[text]
+        with self._cache_lock:
+            if text in self._query_cache:
+                self._query_cache.move_to_end(text)
+                return self._query_cache[text]
         kwargs = {"normalize_embeddings": True, "show_progress_bar": False}
         if self._query_prompt:
             kwargs["prompt_name"] = self._query_prompt
-        result = self.st.encode([text[:_MAX_CHARS_PER_TEXT]], **kwargs)[0].tolist()
-        self._query_cache[text] = result
-        if len(self._query_cache) > self._query_cache_max:
-            self._query_cache.popitem(last=False)
+        with self._encode_lock:
+            result = self.st.encode([text[:_MAX_CHARS_PER_TEXT]], **kwargs)[0].tolist()
+        with self._cache_lock:
+            self._query_cache[text] = result
+            while len(self._query_cache) > self._query_cache_max:
+                self._query_cache.popitem(last=False)
         return result
 
     def embed_queries(self, texts: list[str]) -> list[list[float]]:
