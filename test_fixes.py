@@ -6,10 +6,16 @@
   3. _should_skip 统一过滤口径（gitignore 对 dirty 路径生效）
   4. WorkspaceManager.get 并发创建同一目录只产生一个实例
 """
+import contextlib
+import io
+import logging
 import os
 import random
+import re
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -615,6 +621,240 @@ def test_local_embedder_concurrency() -> None:
     print("[13] LocalEmbedder 并发 OK（推理串行 + 同 key 只算一次 + 无竞态）")
 
 
+def _log_record(msg: str) -> logging.LogRecord:
+    return logging.LogRecord("scm-test", logging.INFO, __file__, 0, msg, None, None)
+
+
+def _spawn_ready(code: str, *args: str) -> subprocess.Popen:
+    """起子进程跑 code（模拟另一个 MCP 实例），等它 stdout 首行打印 ready 后返回。"""
+    proc = subprocess.Popen([sys.executable, "-c", code, *args], stdout=subprocess.PIPE, text=True)
+    line = proc.stdout.readline().strip()
+    if line != "ready":
+        proc.kill()
+        proc.wait()
+        raise AssertionError(f"子进程未就绪: {line!r}")
+    return proc
+
+
+@contextlib.contextmanager
+def _strict_stderr():
+    """强制 raiseExceptions=True 并捕获 stderr：验证 handler 自身静默，不依赖全局开关。"""
+    buf = io.StringIO()
+    saved = sys.stderr, logging.raiseExceptions
+    sys.stderr, logging.raiseExceptions = buf, True
+    try:
+        yield buf
+    finally:
+        sys.stderr, logging.raiseExceptions = saved
+
+
+def test_shared_log_rotate_with_legacy_holder() -> None:
+    """旧版实例常驻持有日志句柄（Windows 上 rename 必败）时：仍能轮转、新日志不丢、stderr 零输出。
+
+    回归 2026-10 事故：多实例共享 server.log，RotatingFileHandler 轮转 rename 失败 →
+    handleError 往 stderr 写 traceback → host 不读 stderr 写满 pipe → 事件循环卡死。
+    """
+    from semantic_code_mcp.log_handler import SharedRotatingFileHandler
+
+    tmpdir = tempfile.mkdtemp()
+    log = os.path.join(tmpdir, "server.log")
+    with open(log, "wb") as f:
+        f.write(b"old\n" * 300)  # 1200B，超过下面 1000B 上限
+    holder = _spawn_ready(
+        "import sys, time\nf = open(sys.argv[1], 'a')\nprint('ready', flush=True)\ntime.sleep(60)\n", log
+    )
+    handler = SharedRotatingFileHandler(log, max_bytes=1000, backup_count=1)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    try:
+        with _strict_stderr() as err:
+            handler.handle(_log_record("fresh-line"))
+        with open(log, "rb") as f:
+            current = f.read()
+        backup = b""
+        if os.path.exists(log + ".1"):
+            with open(log + ".1", "rb") as f:
+                backup = f.read()
+    finally:
+        handler.close()
+        holder.kill()
+        holder.wait()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    assert err.getvalue() == "", f"日志失败不应写 stderr: {err.getvalue()[:300]}"
+    assert current == b"fresh-line\n", f"轮转后新文件应只有新日志: {current[:80]!r}"
+    assert backup == b"old\n" * 300, "旧内容应完整进入 .1"
+    print("[14] 旧实例常驻句柄下轮转 OK（rename 失败降级截断，新日志不丢，stderr 零输出）")
+
+
+def test_shared_log_emit_failure_silent() -> None:
+    """写日志本身失败（日志路径不可写）时不抛异常、不写 stderr：日志永远不能拖垮服务。"""
+    from semantic_code_mcp.log_handler import SharedRotatingFileHandler
+
+    tmpdir = tempfile.mkdtemp()
+    bad = os.path.join(tmpdir, "server.log")
+    os.mkdir(bad)  # 日志路径被目录占住 → open 必败
+    handler = SharedRotatingFileHandler(bad)
+    try:
+        with _strict_stderr() as err:
+            handler.handle(_log_record("lost"))
+    finally:
+        handler.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    assert err.getvalue() == "", f"日志失败不应写 stderr: {err.getvalue()[:300]}"
+    print("[15] 日志写入失败静默 OK（不抛异常、stderr 零输出）")
+
+
+_LOG_WRITER = """
+import logging, sys
+from semantic_code_mcp.log_handler import SharedRotatingFileHandler
+log, tag, max_bytes, n = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+h = SharedRotatingFileHandler(log, max_bytes=max_bytes, backup_count=500, lock_timeout=30)
+h.setFormatter(logging.Formatter("%(message)s"))
+lg = logging.getLogger("w")
+lg.addHandler(h)
+lg.setLevel(logging.INFO)
+for i in range(n):
+    lg.info("proc=%s seq=%04d %s", tag, i, "x" * 40)
+"""
+
+
+def test_shared_log_multiprocess_integrity() -> None:
+    """多进程并发写同一日志：按真实文件大小轮转，无丢行/交错行/超限文件，stderr 零输出。
+
+    覆盖 py3.12+ RotatingFileHandler 用各进程缓存的 tell() 判断大小、多进程下越过上限的问题。
+    """
+    tmpdir = tempfile.mkdtemp()
+    log = os.path.join(tmpdir, "server.log")
+    n_proc, n_lines, max_bytes = 4, 250, 8 * 1024
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _LOG_WRITER, log, str(p), str(max_bytes), str(n_lines)],
+            stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+        )
+        for p in range(n_proc)
+    ]
+    try:
+        errs = [p.communicate(timeout=120)[1] for p in procs]
+        names = sorted(n for n in os.listdir(tmpdir) if not n.endswith(".lock"))
+        sizes: dict[str, int] = {}
+        lines: list[str] = []
+        for name in names:
+            with open(os.path.join(tmpdir, name), "rb") as f:
+                data = f.read()
+            sizes[name] = len(data)
+            lines += data.decode("utf-8").splitlines()
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+                p.wait()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    assert all(p.returncode == 0 for p in procs), f"写入子进程失败: {errs}"
+    assert not any(errs), f"子进程不应有 stderr 输出: {[e[:300] for e in errs if e]}"
+    over = {n: s for n, s in sizes.items() if s > max_bytes}
+    assert not over, f"有文件越过上限 {max_bytes}B: {over}"
+    pat = re.compile(r"proc=(\d) seq=(\d{4}) x{40}")
+    bad = [ln for ln in lines if not pat.fullmatch(ln)]
+    assert not bad, f"出现损坏/交错行: {bad[:3]}"
+    seen = {pat.fullmatch(ln).groups() for ln in lines}
+    assert len(lines) == len(seen) == n_proc * n_lines, \
+        f"丢行或重复: 期望 {n_proc * n_lines}，实际 {len(lines)} 行 / 去重 {len(seen)}"
+    assert len(names) > 2, f"应发生多次轮转: {names}"
+    print(f"[16] 多进程共享日志 OK（{n_proc} 进程 × {n_lines} 行 → {len(names)} 个文件，无丢行/交错/超限）")
+
+
+def test_shared_log_lock_timeout() -> None:
+    """跨进程锁被其它实例长期占住（如持锁时被挂起）时：有界等待后照写，不阻塞调用方（事件循环）。"""
+    from semantic_code_mcp.log_handler import SharedRotatingFileHandler
+
+    tmpdir = tempfile.mkdtemp()
+    log = os.path.join(tmpdir, "server.log")
+    holder = _spawn_ready(
+        "import sys, time\n"
+        "from semantic_code_mcp.log_handler import SharedRotatingFileHandler\n"
+        "h = SharedRotatingFileHandler(sys.argv[1])\n"
+        "assert h._lock_interprocess()\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n",
+        log,
+    )
+    handler = SharedRotatingFileHandler(log, lock_timeout=0.3)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    try:
+        t0 = time.time()
+        handler.handle(_log_record("still-written"))
+        elapsed = time.time() - t0
+        with open(log, "rb") as f:
+            content = f.read()
+    finally:
+        handler.close()
+        holder.kill()
+        holder.wait()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    assert elapsed >= 0.25, f"锁未被占住，测试无效（耗时 {elapsed:.2f}s）"
+    assert elapsed < 2.0, f"锁超时后应快速返回，实测阻塞 {elapsed:.2f}s"
+    assert content == b"still-written\n", f"锁超时不应丢日志: {content!r}"
+    print(f"[17] 跨进程锁超时 OK（有界等待 {elapsed:.2f}s 后照写，不阻塞调用方）")
+
+
+def test_polling_noise_filter_never_raises() -> None:
+    """轮询降噪过滤器：只丢轮询类请求日志；任意 args 形态都不能抛异常（会冒泡到打日志的业务代码）。"""
+    from semantic_code_mcp.log_handler import PollingNoiseFilter
+
+    flt = PollingNoiseFilter()
+
+    def rec(msg, args):
+        return logging.LogRecord("mcp.server.lowlevel.server", logging.INFO, __file__, 0, msg, args, None)
+
+    assert flt.filter(rec("Processing request of type %s", ("ListPromptsRequest",))) is False
+    assert flt.filter(rec("Processing request of type PingRequest", None)) is False
+    assert flt.filter(rec("Processing request of type %s", ("CallToolRequest",))) is True
+    assert flt.filter(rec("unhashable %s", (["ListPromptsRequest"],))) is True
+    assert flt.filter(rec("mapping %(k)s", ({"k": "ListPromptsRequest"},))) is True
+    assert flt.filter(rec(RuntimeError("non-str msg"), None)) is True
+    print("[18] 轮询降噪过滤器 OK（只丢轮询请求，异常 args 不抛）")
+
+
+def test_server_logging_config() -> None:
+    """server 日志配置：共享轮转 handler、关闭 raiseExceptions、行内带 PID、滤掉轮询噪音。"""
+    noise = ("ListPromptsRequest", "ListResourcesRequest", "ListResourceTemplatesRequest", "PingRequest")
+    tmpdir = tempfile.mkdtemp()
+    log = os.path.join(tmpdir, "server.log")
+    code = (
+        "import logging, os\n"
+        "import semantic_code_mcp.server\n"
+        "from semantic_code_mcp.log_handler import SharedRotatingFileHandler\n"
+        "assert logging.raiseExceptions is False, 'raiseExceptions 应关闭（日志出错不写 stderr）'\n"
+        "assert any(isinstance(h, SharedRotatingFileHandler) for h in logging.getLogger().handlers)\n"
+        "low = logging.getLogger('mcp.server.lowlevel.server')\n"
+        f"for t in {noise + ('CallToolRequest',)!r}:\n"
+        "    low.info('Processing request of type %s', t)\n"
+        "logging.getLogger('semantic-code-mcp').info('hello')\n"
+        "print(os.getpid())\n"
+    )
+    env = {**os.environ, "SCM_LOG_FILE": log}
+    for k in ("SCM_LOG_DISABLE", "SCM_LOG_STDERR"):
+        env.pop(k, None)
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", code], env=env, capture_output=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+        text = ""
+        if os.path.exists(log):
+            with open(log, encoding="utf-8") as f:
+                text = f.read()
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert not r.stderr.strip(), f"不应有 stderr 输出: {r.stderr[:300]}"
+    pid = r.stdout.split()[-1]
+    assert "CallToolRequest" in text and "hello" in text, text
+    leaked = [t for t in noise if t in text]
+    assert not leaked, f"轮询噪音未过滤: {leaked}"
+    assert f"[{pid}]" in text, f"日志行应带 PID {pid}: {text[:200]}"
+    print("[19] server 日志配置 OK（共享 handler + 静默 + PID + 轮询降噪）")
+
+
 if __name__ == "__main__":
     test_fts_migration_backfill()
     test_scope_pattern()
@@ -631,4 +871,10 @@ if __name__ == "__main__":
     test_profile_check()
     test_dot_dir_allowlist()
     test_local_embedder_concurrency()
+    test_shared_log_rotate_with_legacy_holder()
+    test_shared_log_emit_failure_silent()
+    test_shared_log_multiprocess_integrity()
+    test_shared_log_lock_timeout()
+    test_polling_noise_filter_never_raises()
+    test_server_logging_config()
     print("\nOK 回归测试全部通过")

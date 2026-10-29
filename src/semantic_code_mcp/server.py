@@ -18,13 +18,13 @@ import logging
 import os
 import sys
 import time
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import Context, FastMCP
 
 from .embedder import create_embedder
+from .log_handler import PollingNoiseFilter, SharedRotatingFileHandler
 from .workspace import WorkspaceManager
 
 # MCP 由 IDE 启动时 CWD 不定：先按 CWD 向上搜 .env（pip/uvx 安装场景，
@@ -41,22 +41,28 @@ LOG_FILE = os.getenv("SCM_LOG_FILE") or str(
 _handlers: list[logging.Handler] = []
 if os.getenv("SCM_LOG_DISABLE") != "1":
     Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
-    _handlers.append(RotatingFileHandler(
+    # 多实例（Windsurf / Devin CLI / uvx 远端版）共写同一文件：标准 RotatingFileHandler 在
+    # Windows 上轮转必败且会把错误写 stderr 卡死事件循环，详见 log_handler 模块说明
+    _handlers.append(SharedRotatingFileHandler(
         LOG_FILE,
-        maxBytes=int(os.getenv("SCM_LOG_MAX_BYTES", str(10 * 1024 * 1024))),
-        backupCount=1,
-        encoding="utf-8",
+        max_bytes=int(os.getenv("SCM_LOG_MAX_BYTES", str(10 * 1024 * 1024))),
+        backup_count=1,
     ))
 if os.getenv("SCM_LOG_STDERR") == "1":
     _handlers.append(logging.StreamHandler(sys.stderr))
 if not _handlers:
     _handlers.append(logging.NullHandler())
+# 兜底：任何 handler 出错时，logging 默认的 handleError 会把 traceback 写 stderr，
+# 绕过"只写本地文件"原则
+logging.raiseExceptions = False
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(message)s",
+    # 带 PID：多个实例共写一个文件时能区分是谁写的
+    format="%(asctime)s [%(process)d] [%(name)s] %(message)s",
     datefmt="%m-%d %H:%M:%S",
     handlers=_handlers,
 )
+logging.getLogger("mcp.server.lowlevel.server").addFilter(PollingNoiseFilter())
 logger = logging.getLogger("semantic-code-mcp")
 
 mcp = FastMCP("semantic-code-mcp")

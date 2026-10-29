@@ -81,6 +81,10 @@ pip install -e .
 | `HTTPS_PROXY` | — | Cohere API 代理（国内需配） |
 | `SCM_MAX_WORKSPACES` | `8` | 最大同时管理的工作区数（LRU 淘汰） |
 | `SCM_WATCH` | `1` | 文件监控：`1` 启用（默认），`0` 禁用 |
+| `SCM_LOG_FILE` | `~/.semantic-code-mcp/server.log`（随 `SCM_DB_DIR`） | 日志文件；多个实例（不同 IDE/客户端）可安全共写，每行带 PID 区分 |
+| `SCM_LOG_MAX_BYTES` | `10485760` | 日志滚动上限（字节），超出后滚动为 `server.log.1` |
+| `SCM_LOG_DISABLE` | — | 设为 `1` 关闭文件日志 |
+| `SCM_LOG_STDERR` | — | 设为 `1` 额外输出到 stderr（仅调试用：host 不读 stderr 时会阻塞进程） |
 
 ## 在 MCP 客户端注册
 
